@@ -13,16 +13,17 @@ this repository: the tables are generated from formulas at start-up.
 
 | Parameter    | Range     | On the Monomachine | What it does |
 |--------------|-----------|--------------------|--------------|
-| Time         | 0–127     | DTIM | (Time + 1) / 256 of a whole note, at the host's tempo: 15 = 1/16, 31 = 1/8, 47 = dotted 1/8, 63 = 1/4, 127 = 1/2. |
+| Time         | 0–127     | DTIM | (Time + 1) / 256 of a whole note: 15 = 1/16, 31 = 1/8, 47 = dotted 1/8, 63 = 1/4, 127 = 1/2. |
 | Feedback     | 0–127     | DFB  | Loop gain is Feedback / 64: above 64 the echoes grow until they saturate, as on the unit. |
 | Filter Base  | 0–127     | DBAS | One-pole high-pass in the loop, 10 Hz to 18.8 kHz. |
 | Filter Width | 0–127     | DWID | One-pole low-pass at Base + Width (capped at 127). |
 | Ping-Pong    | Off / On  | sign of DSND | On: echoes alternate between left and right. |
 | Mix          | 0–100 %   | (replaces DSND) | 0 % dry only, 100 % delay only. The input always goes into the delay at full level. |
+| Tempo Sync   | On / Off  | (none) | On (default): Time follows the host's tempo. Off: the delay runs at 120 BPM, the unit's default tempo, whatever the host does: Time 0–127 is then 7.8 ms to 1 s in 7.8 ms steps. |
 
 All parameters can be automated and modulated in Bitwig. The Time field shows
-the note length and the delay in milliseconds at the current tempo, and accepts
-a note length such as `3/16`.
+the delay in milliseconds, as the firmware computes it at the current tempo,
+and accepts a time in milliseconds (it picks the nearest step).
 
 ## How it behaves
 
@@ -53,7 +54,8 @@ This is what the firmware does; the plug-in keeps all of it.
 - **No glide-in on load.** A new instance starts at its delay time. The unit
   starts at 8,192 samples and glides to the set time.
 - **Tempo** comes from the host's transport, held to the unit's 30–300 BPM
-  (120 BPM if the host sends none).
+  (120 BPM if the host sends none). With Tempo Sync off it is fixed at 120 BPM;
+  the unit itself is always synced to its tempo.
 - **Feedback is never cut.** The firmware sets it to zero during one phase of
   the track's amp envelope (a fixed-rate fade). The plug-in has no envelope.
 - **Other sample rates.** The delay runs at 44.1 kHz, the unit's rate. At other
@@ -113,7 +115,8 @@ firmware-derived hashes. `clap_test` loads the built plug-in and checks:
 - the dry path untouched at 44.1, 48 and 96 kHz;
 - the echo time at 48 kHz;
 - ping-pong;
-- state and the parameter text.
+- Tempo Sync off;
+- state (including a 0.1.0 state) and the parameter text.
 
 The plug-in also passes clap-trap's `validate` (at 44.1, 48 and 96 kHz) and
 `state --roundtrip`.

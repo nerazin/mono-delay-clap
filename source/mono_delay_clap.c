@@ -5,7 +5,8 @@
  *  - the main CPU's handling of a knob: every 384 frames the word moves a
  *    quarter of the way to the knob's value; modulation is added on top,
  *    unsmoothed, every 48 frames (as the Monomachine's LFOs are);
- *  - the tempo word from the host's transport (30..300 BPM, as the unit);
+ *  - the tempo word from the host's transport (30..300 BPM, as the unit), or
+ *    120 BPM, the unit's default tempo, with Tempo Sync off;
  *  - Mix instead of the send: the input goes into the delay at full level
  *    (DSND -64, or +63 with ping-pong), and Mix fades from dry to the delay;
  *  - sample-rate conversion when the host does not run at 44.1 kHz.
@@ -20,10 +21,10 @@
 #include "mono_delay.h"
 
 /* The first four parameters are the core's controls, in its order. */
-enum { TIME, FEEDBACK, BASE, WIDTH, PINGPONG, MIX, NPARAM };
+enum { TIME, FEEDBACK, BASE, WIDTH, PINGPONG, MIX, SYNC, NPARAM };
 static const struct { const char *name; double min, max, def; } info[NPARAM] = {
    {"Time", 0, 127, 64}, {"Feedback", 0, 127, 28}, {"Filter Base", 0, 127, 0},
-   {"Filter Width", 0, 127, 127}, {"Ping-Pong", 0, 1, 0}, {"Mix", 0, 100, 50},
+   {"Filter Width", 0, 127, 127}, {"Ping-Pong", 0, 1, 0}, {"Mix", 0, 100, 50}, {"Tempo Sync", 0, 1, 1},
 };
 
 static const char *const features[] = {
@@ -35,7 +36,7 @@ static const clap_plugin_descriptor_t descriptor = {
    .name = "Mono Delay",
    .vendor = "Independent DSP",
    .url = "", .manual_url = "", .support_url = "",
-   .version = "0.1.0",
+   .version = "0.2.0",
    .description = "The Monomachine track delay, ported from its DSP code",
    .features = features,
 };
@@ -126,6 +127,10 @@ static uint64_t to_bits(double x) { uint64_t u; memcpy(&u, &x, sizeof u); return
 static double value(const Plugin *s, int id) { return bits_to(atomic_load_explicit(&s->value[id], memory_order_relaxed)); }
 static void set_value(Plugin *s, int id, double x) { atomic_store_explicit(&s->value[id], to_bits(x), memory_order_relaxed); }
 static uint32_t tick_of(double bpm) { return (uint32_t)clamp(lround(24.0 * bpm), 720, 7200); }
+/* The tempo word: the host's tempo, or 120 BPM with Tempo Sync off. */
+static uint32_t current_tick(const Plugin *s, bool sync) {
+   return sync ? tick_of(bits_to(atomic_load_explicit(&s->bpm, memory_order_relaxed))) : 2880;
+}
 
 /* Start of a control frame (three blocks): the words the main CPU sends. */
 static void control_frame(Plugin *s) {
@@ -137,7 +142,7 @@ static void control_frame(Plugin *s) {
       s->word[i] = s->mod[i] == 0 ? s->knob[i] : (int32_t)lrint(clamp(s->knob[i] + s->mod[i] * 65536.0, 0, 0x7effff));
    }
    s->word[MD_SEND] = value(s, PINGPONG) + s->mod[PINGPONG] >= 0.5 ? 0x7f0000 : 0;
-   s->tick = tick_of(bits_to(atomic_load_explicit(&s->bpm, memory_order_relaxed)));
+   s->tick = current_tick(s, value(s, SYNC) + s->mod[SYNC] >= 0.5);
    if (!s->settled) md_settle(&s->core, s->word[MD_TIME], s->tick);   /* start on time, not gliding in */
    s->settled = true;
 }
@@ -310,7 +315,7 @@ static bool params_info(const clap_plugin_t *p, uint32_t i, clap_param_info_t *p
    memset(pi, 0, sizeof *pi);
    pi->id = i;
    pi->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_MODULATABLE | CLAP_PARAM_REQUIRES_PROCESS |
-               (i == PINGPONG ? CLAP_PARAM_IS_STEPPED : 0);
+               (i == PINGPONG || i == SYNC ? CLAP_PARAM_IS_STEPPED : 0);
    snprintf(pi->name, sizeof pi->name, "%s", info[i].name);
    pi->min_value = info[i].min;
    pi->max_value = info[i].max;
@@ -323,33 +328,35 @@ static bool params_get(const clap_plugin_t *p, clap_id id, double *v) {
    return true;
 }
 static double cutoff(int index) { return 10.0 * pow(2000.0, (index < 127 ? index : 127) / 128.0); }
+/* The delay the unit makes of DTIM i at a tempo word, in milliseconds. */
+static double time_ms(int i, uint32_t tick) {
+   md_acc time, rate;
+   md_target(i << 16, tick, &time, &rate);
+   return (md_hi(rate) ? (double)time / 16777216.0 : 16368.0 * 16777216.0 / (double)rate) * 1000.0 / NATIVE;
+}
 static bool params_to_text(const clap_plugin_t *p, clap_id id, double v, char *out, uint32_t cap) {
    const Plugin *s = p->plugin_data;
    if (id >= NPARAM || !out || !cap || !isfinite(v)) return false;
-   if (id == TIME) {   /* (DTIM + 1) / 256 of a whole note, and what the unit makes of it at this tempo */
-      const int i = (int)lrint(clamp(v, 0, 127)), n = i + 1, g = n & -n;   /* n <= 128: g = gcd(n, 256) */
-      md_acc time, rate;
-      md_target(i << 16, tick_of(bits_to(atomic_load_explicit(&s->bpm, memory_order_relaxed))), &time, &rate);
-      const double samples = md_hi(rate) ? (double)time / 16777216.0 : 16368.0 * 16777216.0 / (double)rate;
-      snprintf(out, cap, "%d/%d (%.1f ms)", n / g, 256 / g, samples * 1000.0 / NATIVE);
-   } else if (id == BASE) snprintf(out, cap, "%.1f (%.0f Hz)", v, cutoff((int)v));
+   if (id == TIME) snprintf(out, cap, "%.1f ms", time_ms((int)lrint(clamp(v, 0, 127)), current_tick(s, value(s, SYNC) >= 0.5)));
+   else if (id == BASE) snprintf(out, cap, "%.1f (%.0f Hz)", v, cutoff((int)v));
    else if (id == WIDTH) snprintf(out, cap, "%.1f (%.0f Hz)", v, cutoff((int)(value(s, BASE) + v)));
-   else if (id == PINGPONG) snprintf(out, cap, "%s", v >= 0.5 ? "On" : "Off");
+   else if (id == PINGPONG || id == SYNC) snprintf(out, cap, "%s", v >= 0.5 ? "On" : "Off");
    else if (id == MIX) snprintf(out, cap, "%.0f %%", v);
    else snprintf(out, cap, "%.1f", v);
    return true;
 }
 static bool params_from_text(const clap_plugin_t *p, clap_id id, const char *text, double *v) {
-   (void)p;
+   const Plugin *s = p->plugin_data;
    if (id >= NPARAM || !text || !v) return false;
-   if (id == PINGPONG && (!strcmp(text, "On") || !strcmp(text, "Off"))) { *v = text[1] == 'n'; return true; }
+   if ((id == PINGPONG || id == SYNC) && (!strcmp(text, "On") || !strcmp(text, "Off"))) { *v = text[1] == 'n'; return true; }
    char *end = NULL;
    double x = strtod(text, &end);
    if (end == text || !isfinite(x)) return false;
-   if (id == TIME && *end == '/') {   /* a note length: "1/16" */
-      const double d = strtod(end + 1, NULL);
-      if (!(d > 0)) return false;
-      x = 256.0 * x / d - 1.0;
+   if (id == TIME) {   /* milliseconds: the nearest step at this tempo */
+      const uint32_t tick = current_tick(s, value(s, SYNC) >= 0.5);
+      int best = 0;
+      for (int i = 1; i < 128; ++i) if (fabs(time_ms(i, tick) - x) < fabs(time_ms(best, tick) - x)) best = i;
+      x = best;
    }
    *v = clamp(x, info[id].min, info[id].max);
    return true;
@@ -361,7 +368,7 @@ static void params_flush(const clap_plugin_t *p, const clap_input_events_t *in, 
 }
 static const clap_plugin_params_t params = {params_count, params_info, params_get, params_to_text, params_from_text, params_flush};
 
-static const uint8_t magic[8] = {'M', 'D', 'L', 'Y', 0, 0, 0, 1};
+static const uint8_t magic[8] = {'M', 'D', 'L', 'Y', 0, 0, 0, 2};   /* version 1 (0.1.0) had no Tempo Sync */
 static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
    uint8_t buf[8 + 8 * NPARAM];
    memcpy(buf, magic, 8);
@@ -374,17 +381,23 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
    }
    return true;
 }
-static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
-   Plugin *s = p->plugin_data;
-   uint8_t buf[8 + 8 * NPARAM];
-   for (uint64_t done = 0; done < sizeof buf;) {
-      const int64_t n = st && st->read ? st->read(st, buf + done, sizeof buf - done) : -1;
+static bool read_all(const clap_istream_t *st, uint8_t *buf, uint64_t size) {
+   for (uint64_t done = 0; done < size;) {
+      const int64_t n = st && st->read ? st->read(st, buf + done, size - done) : -1;
       if (n <= 0) return false;
       done += (uint64_t)n;
    }
-   if (memcmp(buf, magic, 8)) return false;
+   return true;
+}
+static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
+   Plugin *s = p->plugin_data;
+   uint8_t buf[8 + 8 * NPARAM];
+   if (!read_all(st, buf, 8) || memcmp(buf, magic, 7) || buf[7] < 1 || buf[7] > 2) return false;
+   const int count = buf[7] == 1 ? SYNC : NPARAM;
+   if (!read_all(st, buf + 8, 8 * (uint64_t)count)) return false;
    double v[NPARAM];
-   for (int i = 0; i < NPARAM; ++i) {
+   v[SYNC] = info[SYNC].def;
+   for (int i = 0; i < count; ++i) {
       uint64_t u = 0;
       for (int b = 0; b < 8; ++b) u |= (uint64_t)buf[8 + 8 * i + b] << (8 * b);
       v[i] = bits_to(u);
