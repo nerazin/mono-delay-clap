@@ -1,0 +1,6 @@
+/build/
+/tests/test_core
+/tests/clap_test
+*.o
+.DS_Store
+*.dSYM/
