@@ -22,8 +22,10 @@ this repository: the tables are generated from formulas at start-up.
 | Tempo Sync   | On / Off  | (none) | On (default): Time follows the host's tempo. Off: the delay runs at 120 BPM, the unit's default tempo, whatever the host does: Time 0–127 is then 7.8 ms to 1 s in 7.8 ms steps. |
 
 All parameters can be automated and modulated in Bitwig. The Time field shows
-the delay in milliseconds, as the firmware computes it at the current tempo,
-and accepts a time in milliseconds (it picks the nearest step).
+the delay in milliseconds, as the firmware computes it at the current tempo.
+With Tempo Sync on it also shows the note length, as in `1/16 (125.0 ms)`;
+with Tempo Sync off it shows only the milliseconds. It accepts a time in
+milliseconds (it picks the nearest step) or a note length such as `1/16`.
 
 ## How it behaves
 

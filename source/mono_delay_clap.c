@@ -36,7 +36,7 @@ static const clap_plugin_descriptor_t descriptor = {
    .name = "Mono Delay",
    .vendor = "Independent DSP",
    .url = "", .manual_url = "", .support_url = "",
-   .version = "0.2.0",
+   .version = "0.2.1",
    .description = "The Monomachine track delay, ported from its DSP code",
    .features = features,
 };
@@ -337,8 +337,13 @@ static double time_ms(int i, uint32_t tick) {
 static bool params_to_text(const clap_plugin_t *p, clap_id id, double v, char *out, uint32_t cap) {
    const Plugin *s = p->plugin_data;
    if (id >= NPARAM || !out || !cap || !isfinite(v)) return false;
-   if (id == TIME) snprintf(out, cap, "%.1f ms", time_ms((int)lrint(clamp(v, 0, 127)), current_tick(s, value(s, SYNC) >= 0.5)));
-   else if (id == BASE) snprintf(out, cap, "%.1f (%.0f Hz)", v, cutoff((int)v));
+   if (id == TIME) {   /* synced: (DTIM + 1) / 256 of a whole note too */
+      const bool sync = value(s, SYNC) >= 0.5;
+      const int i = (int)lrint(clamp(v, 0, 127)), n = i + 1, g = n & -n;   /* n <= 128: g = gcd(n, 256) */
+      const double ms = time_ms(i, current_tick(s, sync));
+      if (sync) snprintf(out, cap, "%d/%d (%.1f ms)", n / g, 256 / g, ms);
+      else snprintf(out, cap, "%.1f ms", ms);
+   } else if (id == BASE) snprintf(out, cap, "%.1f (%.0f Hz)", v, cutoff((int)v));
    else if (id == WIDTH) snprintf(out, cap, "%.1f (%.0f Hz)", v, cutoff((int)(value(s, BASE) + v)));
    else if (id == PINGPONG || id == SYNC) snprintf(out, cap, "%s", v >= 0.5 ? "On" : "Off");
    else if (id == MIX) snprintf(out, cap, "%.0f %%", v);
@@ -352,7 +357,11 @@ static bool params_from_text(const clap_plugin_t *p, clap_id id, const char *tex
    char *end = NULL;
    double x = strtod(text, &end);
    if (end == text || !isfinite(x)) return false;
-   if (id == TIME) {   /* milliseconds: the nearest step at this tempo */
+   if (id == TIME && *end == '/') {   /* a note length: "1/16" */
+      const double d = strtod(end + 1, NULL);
+      if (!(d > 0)) return false;
+      x = 256.0 * x / d - 1.0;
+   } else if (id == TIME) {   /* milliseconds: the nearest step at this tempo */
       const uint32_t tick = current_tick(s, value(s, SYNC) >= 0.5);
       int best = 0;
       for (int i = 1; i < 128; ++i) if (fabs(time_ms(i, tick) - x) < fabs(time_ms(best, tick) - x)) best = i;

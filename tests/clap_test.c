@@ -144,10 +144,16 @@ int main(int argc, char **argv) {
       CHECK(!sb->load(b, &is), "a bad state must be refused");
       char text[64];
       double x;
-      CHECK(pb->value_to_text(b, 0, 15, text, sizeof text) && !strcmp(text, "125.0 ms"), "time text %s", text);
-      CHECK(pb->text_to_value(b, 0, "250 ms", &x) && x == 31, "time from text %f", x);
+      const clap_plugin_params_t *pa = a->get_extension(a, CLAP_EXT_PARAMS);   /* a: Tempo Sync off; b: on */
+      char free_text[64];
+      CHECK(pa->value_to_text(a, 0, 15, free_text, sizeof free_text) && !strcmp(free_text, "125.0 ms"), "free time text %s", free_text);
+      CHECK(pa->text_to_value(a, 0, "250 ms", &x) && x == 31, "free time from text %f", x);
+      CHECK(pb->value_to_text(b, 0, 15, text, sizeof text) && !strcmp(text, "1/16 (125.0 ms)"), "synced time text %s", text);
+      CHECK(pb->text_to_value(b, 0, text, &x) && x == 15, "synced time text round trip %f", x);
+      CHECK(pb->text_to_value(b, 0, "3/32", &x) && x == 23, "time from a note length %f", x);
+      CHECK(pb->text_to_value(b, 0, "250 ms", &x) && x == 31, "synced time from ms %f", x);
       done(a); done(b);
-      printf("PASS state round trip; Time 15 shows \"%s\"\n", text);
+      printf("PASS state round trip; Time 15 shows \"%s\" synced, \"%s\" free\n", text, free_text);
    }
    entry->deinit();
    return 0;
